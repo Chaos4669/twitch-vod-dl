@@ -1,0 +1,7 @@
+# syntax=docker/dockerfile:1
+ARG RUNTIME_IMAGE=twitch-vod-dl:runtime
+FROM ${RUNTIME_IMAGE}
+
+ARG SOURCE_ARCHIVE
+COPY ${SOURCE_ARCHIVE} ${SOURCE_ARCHIVE}.sha256 /usr/share/twitch-vod-dl/sources/
+RUN cd /usr/share/twitch-vod-dl/sources && sha256sum -c "${SOURCE_ARCHIVE}.sha256"
