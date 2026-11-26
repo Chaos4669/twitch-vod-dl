@@ -7,8 +7,8 @@ Automatically downloads Twitch VODs using [twitch-dl](https://github.com/ihabune
 - The container stays running and starts its first check immediately on startup. Each cycle finishes all downloads, video splitting, and cleanup before starting a one-hour pause. The next check begins only after that pause ends.
 - It fetches the latest `VOD_COUNT` archived broadcasts, newest first, and downloads any that are missing locally, processing the selected VODs oldest first.
 - A VOD still being recorded is skipped. With `VOD_COUNT=5`, a recording among the latest five leaves four completed VODs to check. With `VOD_COUNT=1`, a live VOD leaves no download candidates until it finishes.
-- Downloads are saved to `/vods/VODs/<channel>/` as `S<season>E<episode>_<YYYY-MM-DD_HH-MMZ>_<title>_<vod_id>.mp4`, for example `S001E01_2026-10-14_18-30Z_Test stream_1234567890.mp4`. Each VOD gets one season, starting at `S001`; its parts are episodes starting at `E01`. Season numbers use at least three digits and episodes at least two. Videos longer than three hours are split into approximately three-hour episodes; shorter videos have only `E01`. All episodes of a broadcast count as one VOD.
-- The timestamp is the start of the VOD recording (`recordedAt` from Twitch), normalized to UTC with minute precision; `Z` means UTC. It is not the download or publication time. All episodes use the same stream start timestamp. Titles are sanitized and shortened to 20 characters. Missing or invalid recording start times cause that VOD to be retried on the next check.
+- Downloads are saved in `/vods/VODs/<channel>/` with filenames such as `S001E01_2026-10-14_18-30Z_Test stream_1234567890.mp4`. Each VOD gets one season, starting at `S001`, and its parts are numbered as episodes starting at `E01`. Season numbers use at least three digits and episode numbers at least two. Videos up to three hours have one episode. Longer videos are split into roughly three-hour episodes. All episodes of a broadcast count as one VOD.
+- The timestamp is the start of the VOD recording (`recordedAt` from Twitch), normalized to UTC with minute precision. All episodes use the same timestamp. Titles are sanitized and shortened to 20 characters. The title is omitted if it is empty after sanitization. If the recording start time is missing or invalid, the downloader retries the VOD on later checks while it remains in the configured window.
 - Season numbers are determined entirely from existing VOD filenames in each output directory: the highest `S...E...` season number plus one, or `S001` if none exist. No database or tracking file is created or read. Gaps below the highest season are not filled. Deleting the highest season allows its number to be reused; removing all seasons resets numbering to `S001`. All episodes of a new VOD share the same season number. Run one downloader per output directory so downloads do not assign seasons concurrently.
 - The VOD ID at the end of each filename is used for duplicate detection and cleanup. Existing downloads in older formats (including `Teil` filenames) remain recognized without renaming or downloading them again; they do not reserve seasons. Existing season numbers stay fixed, so manually downloading an older VOD later gives it the next season rather than renumbering the library.
 - A VOD is skipped when matching local MP4 files exist and all are nonempty. Their contents and expected part count are not verified. Download chunks, assembly, and splitting use a temporary folder under `/vods/tmp/`. Completed parts are moved into `/vods/VODs/<channel>/`, and the temporary folder is removed after success or failure.
@@ -19,7 +19,7 @@ For example, if a cycle starts at 12:00 and finishes downloading, splitting, and
 
 ## Building the Image
 
-Build the Alpine Linux image from the project directory.
+Build the Alpine Linux runtime image for `linux/amd64` from the project directory.
 
 ```bash
 docker build --pull --platform linux/amd64 -t twitch-vod-dl:latest .
@@ -66,8 +66,6 @@ Mount a writable host directory or Kubernetes PersistentVolume at `/vods` to kee
 
 Channel folder names and the `VODs` folder are case-sensitive inside the Linux container. Existing downloads must be under `/vods/VODs/<channel>/` to be recognized; files in the previous `/vods/<channel>/` location are not moved automatically.
 
-Season numbering is recovered from the video filenames after a restart. Any `.vod-seasons.sqlite3` file left by an earlier version is ignored and can be deleted.
-
 For Jellyfin, point a **Shows** library at the `VODs` subdirectory of the mounted host folder, with each channel directory as a series folder. This keeps `/vods/tmp/` outside the library. The `S001E01`, `S001E02`, etc. prefixes identify the VOD's season and individual episodes. Files remain directly in the output directory. Jellyfin's [TV show documentation](https://jellyfin.org/docs/general/server/media/shows/) describes its recommended series/season folder organization.
 
 ## Manual Downloads
@@ -108,36 +106,6 @@ Tests use mocked Twitch/downloader commands and temporary directories; they do n
 
 The [MIT license](LICENSE) covers the source code and documentation of this project. Each dependency retains its own license.
 
-- [twitch-dl 3.3.2](https://pypi.org/project/twitch-dl/3.3.2/) is GPLv3-licensed. Alpine also ships GPL-licensed software such as [FFmpeg](https://pkgs.alpinelinux.org/package/v3.23/community/x86_64/ffmpeg) and [BusyBox](https://pkgs.alpinelinux.org/package/v3.23/main/x86_64/busybox). Anyone distributing a built image must satisfy the terms for the components in that image, including providing corresponding source where required for the exact versions shipped.
+[twitch-dl 3.3.2](https://pypi.org/project/twitch-dl/3.3.2/) is GPLv3-licensed. Alpine also ships GPL-licensed software such as [FFmpeg](https://pkgs.alpinelinux.org/package/v3.23/community/x86_64/ffmpeg) and [BusyBox](https://pkgs.alpinelinux.org/package/v3.23/main/x86_64/busybox). Release images built with the [release Dockerfile](tools/Dockerfile.release) include the corresponding sources and license notices as a `.tar.gz` archive with a SHA-256 checksum under `/usr/share/twitch-vod-dl/sources/`.
 
 Download VODs only where you have permission under [Twitch's Terms of Service](https://www.twitch.tv/p/en/terms-of-service/) and the applicable content rights.
-
-### Release source archive
-
-Run these commands from the project checkout to build a release image containing the corresponding sources and license notices. The collector reads the installed Alpine and Python package metadata and the Rust dependency metadata embedded in the native libraries. It verifies the source downloads against their upstream checksums and records the runtime image digest in the inventory.
-
-```bash
-image=twitch-vod-dl:runtime
-docker build --pull --platform linux/amd64 -t "$image" .
-digest=$(docker image inspect --format '{{.Id}}' "$image")
-mkdir -p release-sources
-docker run --rm \
-  --mount "type=bind,source=$PWD,target=/workspace,readonly" \
-  --mount "type=bind,source=$PWD/release-sources,target=/release" \
-  --entrypoint python3 "$image" /workspace/tools/collect_release_sources.py \
-  --image "$digest" --output /release
-
-archive="twitch-vod-dl-sources-${digest#sha256:}-linux-amd64.tar.gz"
-docker build --platform linux/amd64 -t twitch-vod-dl:latest \
-  --build-arg "RUNTIME_IMAGE=$image" --build-arg "SOURCE_ARCHIVE=$archive" \
-  -f - release-sources < tools/Dockerfile.release
-```
-
-Use a fresh output directory for a different runtime image digest. The final release includes the verified `.tar.gz` and its checksum at `/usr/share/twitch-vod-dl/sources/`. Use a stopped container to copy the files out of the image.
-
-```bash
-container=$(docker create twitch-vod-dl:latest)
-mkdir -p image-sources
-docker cp "$container:/usr/share/twitch-vod-dl/sources/." image-sources/
-docker rm "$container"
-```
